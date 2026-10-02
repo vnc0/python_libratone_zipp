@@ -79,6 +79,9 @@ _UDP_NOTIFICATION_RECEIVE_PORT = 3333    # Port to receive notification from the
 _UDP_BUFFER_SIZE = 4096                 # 4096 in order to receive Channel data
 _KEEPALIVE_CHECK_PERIOD = 60            # Time in second between each keep-alive check 
 
+_GET_SPACING = 0.3                      # Seconds between two GET requests of a get_all() cycle (the speaker drops bursts)
+_CONFIRM_DELAY = 0.8                    # Seconds to wait after a SET before reading the value back
+
 # Define Zipp commands ID
 _COMMAND_TABLE = {
     # com.libratone.model.LSSDPNode , fetchAllForWifi contain all useful fonctions 
@@ -103,6 +106,8 @@ _COMMAND_TABLE = {
         'pause': 'PAUSE',
         'next': 'NEXT',
         'prev': 'PREV',
+        'mute': 'MUTE',
+        'unmute': 'UNMUTE',
     },
     'PlayStatus': {
         '_get': 51,     # from com.libratone.model.LSSDPNode, fetchPlayStatus - see below for data
@@ -166,12 +171,93 @@ _COMMAND_TABLE = {
         # Used for trigger
         '_get': 1284,   # from com.libratone.model.LSSDPNode, fetchChargingStatus
     },
+    'MaxVolume': {
+        '_get': 300,    # from com.libratone.model.LSSDPNode, fetchMaxVolume
+        '_set': 300,    # setMaxVolume - data "0".."100"
+    },
+    'LedLevel': {
+        '_get': 296,    # from com.libratone.model.LSSDPNode, fetchCurrentLedDisplayLevel
+        '_set': 296,    # setCurrentLedDisplayLevel - data "0".."2"
+    },
+    'VoicePrompt': {
+        '_get': 293,    # from com.libratone.model.LSSDPNode, fetch(293)
+        '_set': 293,    # data "1" on, "0" off
+    },
+    'StereoType': {
+        '_get': 515,    # from com.libratone.model.LSSDPNode, fetchSpeakerStereoType
+        '_set': 512,    # setSpeakerStereoType - data "0" stereo, "1" left, "2" right
+    },
+    'FavoriteSet': {
+        '_set': 276,    # from com.libratone.model.LSSDPNode, setChannel - data is the JSON of one channel
+    },
+    'FirmwareUpdate': {
+        '_get': 66,     # fetchDeltaNFirmwareUpdateStatus - GET with data "0" answers {"state": n, "err": n}
+    },
+    'SourceInfo': {
+        '_get': 10,     # fetchSourceInfo - bytes: source code, sn, status, ability flags (4 bytes, little endian)
+    },
+    'PlayMode': {
+        '_get': 1541,   # fetch/set play mode, see PLAY_MODES
+        '_set': 1541,
+    },
     'Group': {
         '_notif': 103,   # UDP 3333: e.g. 'MASTER,LINK ...', 'SLAVE,LINK ...'
         '_join':  502,   # 0x01F6: control write with 'LINK <link_id>'  (join)
         '_leave': 503,   # 0x01F7: control write with 'LINK <link_id>'  (leave)
    },
 }
+
+# Values of the additional commands - see the section at the end of the class
+STEREO_TYPES = {"0": "stereo", "1": "left", "2": "right"}
+STEREO_TYPE_IDS = {name: type_id for type_id, name in STEREO_TYPES.items()}
+
+# Firmware update state (command 66, GET with data "0"); names from the Android app's log texts
+FW_UPDATE_STATES = {
+    0: "none",            # no valid update package
+    1: "available",       # valid package found, not downloaded yet
+    2: "downloading",
+    3: "ready",           # downloaded, can be installed
+    4: "updating",        # installing, the speaker restarts
+    5: "updated",         # finished after the reboot
+    6: "mandatory",       # mandatory package ready
+}
+
+# Active source (command 10, byte 0): the ASCII value of the Android app's SourceInfo constants
+SOURCE_TYPES = {
+    48: "none",
+    49: "airplay",
+    50: "dlna",
+    51: "dlna",
+    52: "spotify",
+    53: "usb",
+    54: "sd_card",
+    57: "tunein",
+    59: "group",           # follower in a multi-room group
+    60: "line_in",
+    62: "url",
+    63: "preset",          # favorite / preset station
+    65: "bluetooth",
+    66: "aux",
+    68: "usb",
+    85: "bluetooth",
+    88: "voice",
+    89: "voice",
+    93: "voice",
+    105: "bluetooth",
+}
+SOURCE_TYPE_OPTIONS = sorted(set(SOURCE_TYPES.values()) | {"other"})
+_ABILITY_SET_PLAY_MODE = 262144    # bit 18 of the source's ability flags: shuffle / repeat can be set
+
+# Play mode (command 1541) as in the Android app's PlayMode enum: value -> (shuffle, repeat)
+PLAY_MODES = {
+    "0": (False, "off"),
+    "1": (True, "all"),
+    "2": (False, "one"),
+    "3": (False, "all"),
+    "6": (True, "off"),
+    "7": (True, "one"),
+}
+PLAY_MODE_IDS = {mode: mode_id for mode_id, mode in PLAY_MODES.items()}
 
 # Check if host is up
 def host_up(host, port=80):
@@ -235,6 +321,15 @@ class LibratoneZipp:
         self.signalstrenght = None
         self.devicecolor = None
         self.mutestatus = None
+
+        # Additional values - see the section at the end of the class
+        self.max_volume = None             # Volume cap in %, str
+        self.led_level = None              # "0".."2"
+        self.voice_prompt = None           # "1" on, "0" off
+        self.stereo_type = None            # "0" stereo, "1" left, "2" right
+        self.firmware_update_raw = None    # JSON text {"state": n, "err": n}
+        self.source_info = None            # bytes, see source_code / source_type
+        self.play_mode = None              # see PLAY_MODES
 
         # Active variables as JSON list - see command table
         self._voicing_list_json = None   
@@ -304,6 +399,13 @@ class LibratoneZipp:
         self.group_link_id = None     
         self.group_last_notifier = None
         self.group_role = None
+        self.max_volume = None
+        self.led_level = None
+        self.voice_prompt = None
+        self.stereo_type = None
+        self.firmware_update_raw = None
+        self.source_info = None
+        self.play_mode = None
 
     # Close the two socket thread by changing the flag and sending two packet to receive two answer on 2 ports
     def exit(self):
@@ -371,6 +473,13 @@ class LibratoneZipp:
         elif command == _COMMAND_TABLE['MuteStatus']['_get']: self.mutestatus = data.decode()
         elif command == _COMMAND_TABLE['DeviceColor']['_get'] or command == _COMMAND_TABLE['DeviceColor']['_set']: self.devicecolor = data.decode()
         elif command == _COMMAND_TABLE['BatteryLevel']['_get'] or command == _COMMAND_TABLE['BatteryLevel']['_get2']: self.batterylevel = data.decode()
+        elif command == _COMMAND_TABLE['MaxVolume']['_get']: self.max_volume = self._text(data)
+        elif command == _COMMAND_TABLE['LedLevel']['_get']: self.led_level = self._text(data)
+        elif command == _COMMAND_TABLE['VoicePrompt']['_get']: self.voice_prompt = self._text(data)
+        elif command == _COMMAND_TABLE['StereoType']['_get'] or command == _COMMAND_TABLE['StereoType']['_set']: self.stereo_type = self._text(data)
+        elif command == _COMMAND_TABLE['FirmwareUpdate']['_get']: self.firmware_update_raw = self._text(data)
+        elif command == _COMMAND_TABLE['SourceInfo']['_get']: self.source_info = bytes(data)
+        elif command == _COMMAND_TABLE['PlayMode']['_get']: self.play_mode = self._text(data)
 
         elif command == _COMMAND_TABLE['Group']['_notif']:
             try:
@@ -563,17 +672,35 @@ class LibratoneZipp:
     
     # Call all *get* functions above, except fixed values
     def get_all(self):
-        self.currpowermode_get()
-        self.chargingstatus_get()
-        self.volume_get()
-        self.voicing_get()
-        self.room_get()
-        self.player_get()
-        self.signalstrenght_get()
-        self.mutestatus_get()
-        self.batterylevel_get()
-        self.timer_get()
-        self.playstatus_get()
+        """Ask for every value that changes at runtime.
+
+        The speaker answers GETs one at a time and silently drops packets that arrive in a burst, so the
+        requests are spaced out by _GET_SPACING seconds (a call takes about 5 seconds).
+        """
+        getters = (
+            self.currpowermode_get,
+            self.chargingstatus_get,
+            self.volume_get,
+            self.voicing_get,
+            self.room_get,
+            self.player_get,
+            self.signalstrenght_get,
+            self.mutestatus_get,
+            self.batterylevel_get,
+            self.timer_get,
+            self.playstatus_get,
+            self.maxvolume_get,
+            self.ledlevel_get,
+            self.voiceprompt_get,
+            self.stereotype_get,
+            self.firmwareupdate_get,
+            self.channel_get,
+            self.sourceinfo_get,
+            self.playmode_get,
+        )
+        for getter in getters:
+            getter()
+            time.sleep(_GET_SPACING)
 
     # Call all *get* for values that are fixed for the lifecycle 
     def get_all_fixed_for_lifecycle(self):
@@ -739,8 +866,13 @@ class LibratoneZipp:
 
         try:
             self._player_json = json.loads(player_data)
-        except:
+        except Exception:
             pass
+
+        # An empty or invalid reply leaves everything at None
+        if not isinstance(self._player_json, dict):
+            self._player_json = None
+            return
 
         self.isFromChannel = self._player_json.get('isFromChannel', '')
         self.play_identity = self._player_json.get('play_identity', '')
@@ -779,3 +911,193 @@ class LibratoneZipp:
         return self.set_control_command(_COMMAND_TABLE['Group']['_leave'], f"LINK {lid}")
 
 
+
+    # ------------------------------------------------------------------------------------------------------
+    # Additional values and commands, found by decompiling the official Android app
+    # (com.libratone.v3.model.LSSDPNode, com.libratone.v3.luci.MIDCONST) and verified on a Zipp 2.
+    # ------------------------------------------------------------------------------------------------------
+
+    @staticmethod
+    def _text(data):
+        """Reply payload as text, tolerating binary bytes."""
+        return bytes(data).decode(errors="ignore").strip()
+
+    def _get_later(self, getter):
+        """Read a value back shortly after a SET (the speaker applies it a moment later) without blocking the caller."""
+        timer = threading.Timer(_CONFIRM_DELAY, getter)
+        timer.daemon = True
+        timer.start()
+
+    def maxvolume_get(self): return self.get_control_command(command=_COMMAND_TABLE['MaxVolume']['_get'])
+    def ledlevel_get(self): return self.get_control_command(command=_COMMAND_TABLE['LedLevel']['_get'])
+    def voiceprompt_get(self): return self.get_control_command(command=_COMMAND_TABLE['VoicePrompt']['_get'])
+    def stereotype_get(self): return self.get_control_command(command=_COMMAND_TABLE['StereoType']['_get'])
+    def firmwareupdate_get(self): return self.get_control_command(command=_COMMAND_TABLE['FirmwareUpdate']['_get'], data="0")
+    def sourceinfo_get(self): return self.get_control_command(command=_COMMAND_TABLE['SourceInfo']['_get'])
+    def playmode_get(self): return self.get_control_command(command=_COMMAND_TABLE['PlayMode']['_get'])
+
+    # Mute: part of the play control commands. mutestatus is "UNMUTE" or "MUTE,<volume before muting>"
+    def mute(self):
+        self.mutestatus = "MUTE"
+        ok = self._playcontrol_set('mute')
+        self._get_later(self.mutestatus_get)
+        return ok
+
+    def unmute(self):
+        self.mutestatus = "UNMUTE"
+        ok = self._playcontrol_set('unmute')
+        self._get_later(self.mutestatus_get)
+        return ok
+
+    @property
+    def is_muted(self):
+        if not self.mutestatus:
+            return None
+        return self.mutestatus.upper().startswith("MUTE")
+
+    # Settings
+    def max_volume_set(self, value):
+        """Volume cap enforced by the speaker itself, 0-100."""
+        value = max(0, min(int(value), 100))
+        self.max_volume = str(value)
+        ok = self.set_control_command(_COMMAND_TABLE['MaxVolume']['_set'], str(value))
+        self._get_later(self.maxvolume_get)
+        return ok
+
+    def led_level_set(self, value):
+        """LED brightness level, 0-2."""
+        value = max(0, min(int(value), 2))
+        self.led_level = str(value)
+        ok = self.set_control_command(_COMMAND_TABLE['LedLevel']['_set'], str(value))
+        self._get_later(self.ledlevel_get)
+        return ok
+
+    def voice_prompt_set(self, enabled):
+        """Spoken status messages on or off."""
+        self.voice_prompt = "1" if enabled else "0"
+        ok = self.set_control_command(_COMMAND_TABLE['VoicePrompt']['_set'], self.voice_prompt)
+        self._get_later(self.voiceprompt_get)
+        return ok
+
+    def stereo_type_set(self, name):
+        """Which channel this speaker plays when two are paired: 'stereo', 'left' or 'right'."""
+        type_id = STEREO_TYPE_IDS[name]
+        self.stereo_type = type_id
+        ok = self.set_control_command(_COMMAND_TABLE['StereoType']['_set'], type_id)
+        self._get_later(self.stereotype_get)
+        return ok
+
+    # Values derived from the raw replies
+    @property
+    def battery_percent(self):
+        try:
+            return int(str(self.batterylevel).strip())
+        except (TypeError, ValueError):
+            return None
+
+    @property
+    def is_charging(self):
+        """The Android app treats charging status 1 as charging (2 was seen at 100 % battery)."""
+        status = self.chargingstatus
+        if status is None or str(status).strip() == "":
+            return None
+        return str(status).strip() == "1"
+
+    @property
+    def wifi_rssi(self):
+        """signalstrenght looks like ' ,-45,65/70' (ssid, rssi in dBm, quality/max)."""
+        parts = str(self.signalstrenght or "").split(",")
+        if len(parts) < 2:
+            return None
+        try:
+            return int(parts[1])
+        except ValueError:
+            return None
+
+    @property
+    def wifi_quality_percent(self):
+        match = re.search(r"(\d+)\s*/\s*(\d+)", str(self.signalstrenght or ""))
+        if not match or int(match.group(2)) == 0:
+            return None
+        return round(100 * int(match.group(1)) / int(match.group(2)))
+
+    # Favorites (the five preset stations)
+    @property
+    def favorites(self):
+        """List of dicts with channel_id, channel_name, channel_identity and channel_type."""
+        if not isinstance(self._channel_json, list):
+            return []
+        return [c for c in self._channel_json if isinstance(c, dict) and c.get("channel_id") is not None]
+
+    def favorite_name(self, slot):
+        for channel in self.favorites:
+            if str(channel.get("channel_id")) == str(slot):
+                return channel.get("channel_name")
+        return None
+
+    def favorite_slot_by_name(self, name):
+        for channel in self.favorites:
+            if channel.get("channel_name") == name:
+                return int(channel["channel_id"])
+        return None
+
+    def favorite_set(self, slot, station_id, name, channel_type="vtuner"):
+        """Store a station in preset `slot` (1-5). station_id is the vTuner id for channel_type 'vtuner'."""
+        entry = {
+            "channel_id": int(slot),
+            "channel_identity": str(station_id),
+            "channel_name": name,
+            "channel_type": channel_type,
+        }
+        ok = self.set_control_command(_COMMAND_TABLE['FavoriteSet']['_set'], json.dumps(entry, ensure_ascii=False))
+        self._get_later(self.channel_get)
+        return ok
+
+    # Firmware: the speaker checks for updates on its own; this is its report
+    @property
+    def firmware_update(self):
+        """(state name, error code) e.g. ('none', 0); None until the speaker answered. See FW_UPDATE_STATES."""
+        if not self.firmware_update_raw:
+            return None
+        try:
+            data = json.loads(self.firmware_update_raw)
+            return FW_UPDATE_STATES.get(int(data["state"]), "unknown"), data.get("err")
+        except (ValueError, KeyError, TypeError):
+            return None
+
+    # Active source (command 10): byte 0 = source code, bytes 3-6 = ability flags (little endian)
+    @property
+    def source_code(self):
+        return self.source_info[0] if self.source_info else None
+
+    @property
+    def source_type(self):
+        """Name of the active source, see SOURCE_TYPES; None until the speaker answered."""
+        code = self.source_code
+        return None if code is None else SOURCE_TYPES.get(code, "other")
+
+    @property
+    def supports_play_mode(self):
+        """True while the active source accepts shuffle / repeat (ability bit 18)."""
+        if not self.source_info or len(self.source_info) < 7:
+            return False
+        return bool(int.from_bytes(self.source_info[3:7], "little") & _ABILITY_SET_PLAY_MODE)
+
+    # Shuffle / repeat (command 1541)
+    @property
+    def shuffle(self):
+        mode = PLAY_MODES.get(self.play_mode or "")
+        return None if mode is None else mode[0]
+
+    @property
+    def repeat(self):
+        """'off', 'one' or 'all'."""
+        mode = PLAY_MODES.get(self.play_mode or "")
+        return None if mode is None else mode[1]
+
+    def play_mode_set(self, shuffle, repeat):
+        mode_id = PLAY_MODE_IDS[(bool(shuffle), repeat)]
+        self.play_mode = mode_id
+        ok = self.set_control_command(_COMMAND_TABLE['PlayMode']['_set'], mode_id)
+        self._get_later(self.playmode_get)
+        return ok

@@ -4,7 +4,7 @@ This aims to control one or multiple Libratone Zipp speaker with a Python librar
 
 Install it with `pip install python-libratone-zipp` - [pip page](https://pypi.org/project/python-libratone-zipp/)
 
-Tested with Libratone Zipp 1, firmware 809, 879.
+Tested with Libratone Zipp 1, firmware 809, 879 and Libratone Zipp 2, firmware 1536.
 
 
 ## Usage
@@ -19,8 +19,8 @@ Other files:
 
 ## Functionality coverage
 
-I'm currently happy with this coverage, so don't expect any updates other than maintenance.  
-The only thing I'm very interested is defining Favorites!
+Besides the original coverage, version 4.2.0 adds the values and commands marked below. They were found by decompiling the Android app
+and checked on a Libratone Zipp 2 (firmware 1536). Pass `data` strings as UTF-8; the speaker reads station names with umlauts.
 
 * Module
     * [x] Clean text variables, declare variable on top instead of using text like "play"
@@ -38,12 +38,11 @@ The only thing I'm very interested is defining Favorites!
     * [x] Retrieve mute status - but no logic implemented!
 * Playback with Bluetooth or USB
     * [ ] Retrieve basic playback status: play, pause, stop
-    * [ ] Retrieve media type: Bluetooth, aux, radio, ...
-    * [ ] Retrieve extended playback status: shuffle, repeat
-    * [ ] Set extended playback status: shuffle, repeat
+    * [x] Retrieve media type: Bluetooth, aux, radio, ... (`source_type`)
+    * [x] Retrieve and set extended playback status: shuffle, repeat (not tested with a source that supports it)
 * Playback control
     * [x] Set basic playback status: play, pause, stop, next, prev
-    * [x] Set volume
+    * [x] Set volume, mute and unmute (`mute()`, `unmute()`, `is_muted`)
 * Standby
     * [x] Retrieve actual speaker state
     * [x] Calculate actual speaker state: UNKOWN, SLEEPING, ON, PLAYING, PAUSED, STOPPED
@@ -60,19 +59,23 @@ The only thing I'm very interested is defining Favorites!
     * [x] Retrieve all Room
 * Favorites
     * [x] Play a Favorite
-    * [x] List configured favorite but no processing (`_channel_json`)
-    * [ ] Set a Favorite
+    * [x] List the configured favorites (`favorites`, `favorite_name()`, `favorite_slot_by_name()`)
+    * [x] Set a Favorite (`favorite_set()`, needs the vTuner station id)
 * Extended current playback info
-    * [ ] Set Source
-    * [ ] Retrieve current source
+    * [x] Retrieve current source and media type (`source_code`, `source_type`)
+    * [x] Set and retrieve shuffle and repeat (`play_mode_set()`, `shuffle`, `repeat`; only while `supports_play_mode`)
+    * [ ] Set Source (see "Input source")
 * Speaker configuration
     * [x] Retrieve current firmware
+    * [x] Retrieve the firmware update state the speaker reports (`firmware_update`)
     * [x] Retrieve speaker name
     * [x] Retrieve speaker color
     * [x] Set speaker name
     * [ ] Map out color codes + Set speaker color
     * [x] Retrieve current serial number
-    * [x] Retrieve current battery level
+    * [x] Retrieve current battery level and charging state (`battery_percent`, `is_charging`)
+    * [x] Set and retrieve the maximum volume, LED level and voice prompts
+    * [x] Set and retrieve the speaker channel: stereo, left, right (`stereo_type_set()`)
     * [ ] Retrieve AC information
 * Network
     * [ ] Retrieve current IP
@@ -84,24 +87,37 @@ The only thing I'm very interested is defining Favorites!
 
 ### Unimplemented commands
 
-Following commands where identified but not implemented and/or implemented but not processed due to lack on `data` investigation. The list is not exhaustive!
+Commands that were identified but are not implemented or not understood well enough. The list is not exhaustive.
 
-From Android application, `com.libratone.model.LSSDPNode`:
+From Android application, `com.libratone.v3.model.LSSDPNode`:
 command|function|notes
 -|-|-
-10  | fetchSourceInfo
 103 | fetchDeviceState
-152 | fetchSource
+121 | setSwitch_Source | accepted (status 1) on a Zipp 2 but no effect on the active source was seen (see "Input source" below)
+122 | setOutputSource | works on a Zipp 2, see "Input source" below; not wrapped yet
+123 / 128 | available / current output source | the Zipp 2 answers a bit mask (`0x01` Bluetooth, `0x02` speaker, `0x04` AUX), the app parses characters
+152 | fetchSource | the Zipp 2 answered 8 binary bytes, not the characters the app parses
 281 | fetchMusicServiceCapability | Answer a JSON
 304 | fetchLimitedFunctionList | Answer 3 bytes
-520 | fetchMuteStatus|Implemented but not processed
 530 | fetchOtaAutoDownLoadStatus
-537 | fetchWifiLinein
-1284| fetchChargingStatus|Implemented but not processed
+537 | fetchWifiLinein / setWifiLinein | accepted on a Zipp 2 without a visible effect
+65 / 66 | firmware update commands | only the state is read (66); installing is not implemented
 1285| fetchPrivateMode
 1536| fetchUsbCurrentPlayId
 1537| fetchUsbPlayMode
 1538| fetchUsbSongInfo
+
+### Input source
+
+Looked at on a Zipp 2 (firmware 1536) while a preset station played. `SET 537` (line in) and `SET 121 = 0` (Bluetooth) are answered
+with status 1 like a successful command, but the active source (`SourceInfo`, command 10) did not change and nothing was heard.
+That may depend on a cable or a paired device being present. `SET 122 = 0 / 1 / 2` changes the *output* instead (command 128 then reads
+`0x01`, `0x02`, `0x04`; the original value was `0x02`, the speaker itself) and was reverted after the test. Selecting an input is
+therefore not offered.
+
+## Tests
+
+`python -m pytest tests` runs offline tests of the parsing and packet building. They need no speaker and no open ports.
 
 ## Acknowledgment
 

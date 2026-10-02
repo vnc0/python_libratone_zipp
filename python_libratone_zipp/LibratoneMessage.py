@@ -69,15 +69,15 @@ class LibratoneMessage:
         return True
 
     def set_commandStatus(self, commandStatus:int):
-        self.commandStatus = commandStatus.to_bytes(2, 'big')
+        self.commandStatus = commandStatus.to_bytes(1, 'big')
         return True
 
-    # Set a data content along with the correct dataLen
+    # Set a data content along with the correct dataLen (in bytes; the speaker reads UTF-8)
     def set_data(self, data):
         if isinstance(data, int): data = str(data)
-        self.datalen = len(data).to_bytes(2, 'big')
-        self.data = bytes(data, "ascii")  
-        return True  
+        self.data = bytes(data, "utf-8")
+        self.datalen = len(self.data).to_bytes(2, 'big')
+        return True
 
     # Return various data  as an int format
     def get_commandType_int(self): return self.commandType[0]

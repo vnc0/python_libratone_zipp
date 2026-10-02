@@ -1,6 +1,9 @@
+import logging
 import socket
 import threading
 from .LibratoneMessage import LibratoneMessage
+
+_LOGGER = logging.getLogger("LibratoneZipp")
 
 # Zipp's UDP ports
 _UDP_CONTROL_PORT = 7777          # where commands get sent
@@ -85,7 +88,11 @@ class SocketHub:
             with self._lock:
                 dev = self._devices.get(src_ip)
             if dev:
-                dev.process_zipp_message(bytearray(data), rx_port)
+                # One malformed reply must not stop the receive thread: every later answer would be dropped
+                try:
+                    dev.process_zipp_message(bytearray(data), rx_port)
+                except Exception:
+                    _LOGGER.debug("Error while processing a Zipp message", exc_info=True)
                 if do_ack:
                     ack = LibratoneMessage(command=0).get_packet()
                     self._send_sock.sendto(ack, (src_ip, _UDP_NOTIFICATION_ACK))
